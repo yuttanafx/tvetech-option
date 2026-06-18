@@ -437,6 +437,7 @@ function analyze(klines){
 
 // FETCH WITH CACHE
 const BIN_INT={'15':'1m','60':'5m','240':'15m'};
+const EXPIRY_MIN={'15':1,'60':5,'240':15};
 async function fetchKlines(key){
   const now=Date.now();const cached=klinesCache[key];
   if(cached&&now-cached.ts<CACHE_TTL)return cached.data;
@@ -555,7 +556,7 @@ function loadDaily(){try{const d=JSON.parse(localStorage.getItem(DKEY)||'null');
 function saveDaily(d){localStorage.setItem(DKEY,JSON.stringify(d));}
 function logSignal(key,dir,price){
   const d=loadDaily();if(d.entries.some(e=>e.asset===key&&e.result==='pending'))return;
-  const expSec=parseInt(tf)*60;
+  const expSec=EXPIRY_MIN[tf]*60;
   d.entries.push({id:Date.now(),time:new Date().toLocaleTimeString('th-TH',{timeZone:'Asia/Bangkok',hour:'2-digit',minute:'2-digit'}),asset:key,dir,entryPrice:price,resolveAt:Date.now()+expSec*1000,result:'pending'});
   saveDaily(d);renderDaily();
 }
