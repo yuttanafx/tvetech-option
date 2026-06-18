@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="th">
-<head> 
+<head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TVE Options Matrix · Pro Engine v3</title>
@@ -164,7 +164,7 @@ window.checkUnlockCode=function(){
     <div class="price-bar">
       <div class="price-label">TVE MATRIX TERMINAL</div>
       <div class="price-title" id="focusTitle">คลิกชื่อสินทรัพย์เพื่อดูชาร์ต</div>
-      <div class="price-sub">Parallel scan · EMA+MACD+BB+ATR+Stoch+RSI+Vol · Score 0–100 · ตารางเรียงสัญญาณแรงสุด</div>
+      <div class="price-sub">Parallel scan · EMA+MACD+BB+ATR+Stoch+RSI+Vol+S/R(50) · Score 0–100 · ตารางเรียงสัญญาณแรงสุด</div>
     </div>
     <div class="chart-container-tv" id="tv_chart_container"></div>
   </div>
@@ -275,9 +275,9 @@ const ASSETS={
   AUDUSD:{tv:"FX:AUDUSD",sym:"AUDUSDT",active:false,name:"AUDUSD",dp:4},
 };
 const FILTERS={
-  loose:{rsiLo:25,rsiHi:75,volMul:1.0,bodyMin:0.3,confirmBars:1,atrMin:0.0002,macdConfirm:false,desc:'<b>LOOSE:</b> EMA+RSI(25-75) เท่านั้น เหมาะตลาด trending แรง'},
-  normal:{rsiLo:35,rsiHi:65,volMul:1.1,bodyMin:0.45,confirmBars:1,atrMin:0.0005,macdConfirm:true,desc:'<b>NORMAL:</b> EMA+MACD+BB+RSI(35-65)+ATR+Vol x1.1'},
-  tight:{rsiLo:40,rsiHi:60,volMul:1.3,bodyMin:0.55,confirmBars:2,atrMin:0.0008,macdConfirm:true,desc:'<b>TIGHT:</b> ทุก indicator ต้องยืนยัน + 2 candle + EMA200 align'},
+  loose:{rsiLo:25,rsiHi:75,volMul:1.0,bodyMin:0.3,confirmBars:1,atrMin:0.0002,macdConfirm:false,srNear:0.004,breakMargin:0.0010,breakoutVolMul:1.3,desc:'<b>LOOSE:</b> EMA+RSI(25-75)+S/R±0.4% เหมาะตลาด trending แรง'},
+  normal:{rsiLo:35,rsiHi:65,volMul:1.1,bodyMin:0.45,confirmBars:1,atrMin:0.0005,macdConfirm:true,srNear:0.003,breakMargin:0.0015,breakoutVolMul:1.5,desc:'<b>NORMAL:</b> EMA+MACD+BB+RSI(35-65)+ATR+Vol x1.1+S/R±0.3%'},
+  tight:{rsiLo:40,rsiHi:60,volMul:1.3,bodyMin:0.55,confirmBars:2,atrMin:0.0008,macdConfirm:true,srNear:0.002,breakMargin:0.0020,breakoutVolMul:1.8,desc:'<b>TIGHT:</b> ทุก indicator ยืนยัน + 2 candle + EMA200 + S/R±0.2%'},
 };
 
 // INDICATORS
@@ -312,6 +312,47 @@ function calcStoch(klines,p=14){
 function bodyRatio(k){const o=parseFloat(k[1]),h=parseFloat(k[2]),l=parseFloat(k[3]),c=parseFloat(k[4]);const r=h-l;if(r===0)return 0;return Math.abs(c-o)/r;}
 function avgVol(klines,p=20){const v=klines.slice(-p-1,-1).map(c=>parseFloat(c[5]));return v.reduce((a,b)=>a+b,0)/v.length;}
 
+// SUPPORT / RESISTANCE — swing high/low pivots over a lookback window, clustered into zones
+function findSwingPivots(klines,lookback=50,leftRight=3){
+  const data=klines.slice(-lookback);
+  const highs=[],lows=[];
+  for(let i=leftRight;i<data.length-leftRight;i++){
+    const h=parseFloat(data[i][2]),l=parseFloat(data[i][3]);
+    let isHigh=true,isLow=true;
+    for(let j=i-leftRight;j<=i+leftRight;j++){
+      if(j===i)continue;
+      if(parseFloat(data[j][2])>=h)isHigh=false;
+      if(parseFloat(data[j][3])<=l)isLow=false;
+      if(!isHigh&&!isLow)break;
+    }
+    if(isHigh)highs.push(h);
+    if(isLow)lows.push(l);
+  }
+  return{highs,lows};
+}
+function clusterLevels(arr,tolPct=0.0015){
+  if(!arr.length)return[];
+  const sorted=[...arr].sort((a,b)=>a-b);
+  const clusters=[];let cur=[sorted[0]];
+  for(let i=1;i<sorted.length;i++){
+    const avg=cur.reduce((a,b)=>a+b,0)/cur.length;
+    if(Math.abs(sorted[i]-avg)/avg<=tolPct)cur.push(sorted[i]);
+    else{clusters.push({level:cur.reduce((a,b)=>a+b,0)/cur.length,touches:cur.length});cur=[sorted[i]];}
+  }
+  clusters.push({level:cur.reduce((a,b)=>a+b,0)/cur.length,touches:cur.length});
+  return clusters;
+}
+function calcSR(klines,lookback=50){
+  const{highs,lows}=findSwingPivots(klines,lookback);
+  return{resistances:clusterLevels(highs),supports:clusterLevels(lows)};
+}
+function nearestLevel(price,levels){
+  if(!levels.length)return null;
+  let best=null,bestDist=Infinity;
+  for(const lv of levels){const d=Math.abs(price-lv.level)/price;if(d<bestDist){bestDist=d;best=lv;}}
+  return best?{...best,distPct:bestDist}:null;
+}
+
 // ANALYSIS ENGINE
 function analyze(klines){
   if(!klines||klines.length<60)return{dir:'hold',score:0,reason:'data insufficient',filtered:true};
@@ -345,6 +386,29 @@ function analyze(klines){
     if(rawDir==='buy'&&!(p1b&&p0b))return{dir:rawDir,score:30,reason:'2-bar confirm ไม่ผ่าน',filtered:true,klines};
     if(rawDir==='sell'&&(p1b||p0b))return{dir:rawDir,score:30,reason:'2-bar confirm ไม่ผ่าน',filtered:true,klines};
   }
+  // SUPPORT/RESISTANCE GATE — ไม่ส่งสัญญาณกลางเทรน ต้องอยู่ใกล้แนวรับ/ต้าน ±cfg.srNear เท่านั้น
+  const sr=calcSR(klines,50);
+  const supLv=nearestLevel(cur,sr.supports);
+  const resLv=nearestLevel(cur,sr.resistances);
+  const nearSup=supLv&&supLv.distPct<=cfg.srNear;
+  const nearRes=resLv&&resLv.distPct<=cfg.srNear;
+  if(!nearSup&&!nearRes)return{dir:rawDir,score:22,reason:'กลางเทรน ไม่มีแนวรับ/ต้านใกล้',filtered:true,klines};
+  const prevClose=closes[len-2];
+  const volSpikeBig=avgV>0&&curVol>=avgV*cfg.breakoutVolMul;
+  let srType=null,srLevel=null;
+  if(nearSup){
+    const lvl=supLv.level;
+    const brokeDown=cur<lvl*(1-cfg.breakMargin)&&prevClose>=lvl*(1-cfg.breakMargin);
+    if(rawDir==='buy'&&!brokeDown){srType='BOUNCE';srLevel=lvl;}
+    else if(rawDir==='sell'&&brokeDown&&volSpikeBig){srType='BREAKOUT';srLevel=lvl;}
+  }
+  if(!srType&&nearRes){
+    const lvl=resLv.level;
+    const brokeUp=cur>lvl*(1+cfg.breakMargin)&&prevClose<=lvl*(1+cfg.breakMargin);
+    if(rawDir==='sell'&&!brokeUp){srType='BOUNCE';srLevel=lvl;}
+    else if(rawDir==='buy'&&brokeUp&&volSpikeBig){srType='BREAKOUT';srLevel=lvl;}
+  }
+  if(!srType)return{dir:rawDir,score:28,reason:'ทิศทางขัดกับ S/R (รอ breakout ยืนยัน หรือ bounce ฝั่งตรงข้าม)',filtered:true,klines};
   const stoch=calcStoch(klines);
   // SCORING
   let score=40;
@@ -363,8 +427,12 @@ function analyze(klines){
   if(trend200)score+=6;
   if(rawDir==='buy'&&hLast>0&&Math.abs(hLast)>Math.abs(hPrev))score+=5;
   if(rawDir==='sell'&&hLast<0&&Math.abs(hLast)>Math.abs(hPrev))score+=5;
+  if(srType==='BREAKOUT')score+=12;
+  if(srType==='BOUNCE')score+=7;
   score=Math.max(0,Math.min(100,Math.round(score)));
-  return{dir:rawDir,score,reason:`RSI ${rsi.toFixed(0)} Vol ${(curVol/avgV).toFixed(1)}x ATR ${(atrRatio*100).toFixed(3)}%`,filtered:false,klines};
+  const srTxt=srType==='BREAKOUT'?'Breakout':'Bounce';
+  const lvlTxt=srLevel.toFixed(srLevel<10?5:2);
+  return{dir:rawDir,score,reason:`${srTxt} @ ${lvlTxt} | RSI ${rsi.toFixed(0)} Vol ${(curVol/avgV).toFixed(1)}x ATR ${(atrRatio*100).toFixed(3)}%`,filtered:false,klines,srType,srLevel};
 }
 
 // FETCH WITH CACHE
@@ -425,9 +493,11 @@ async function runScanner(){
     if(r.filtered){filtered++;badge=`<span class="dir-badge filtered" title="${r.reason}">BLOCK</span>`;}
     else if(r.dir==='hold'){badge=`<span class="dir-badge hold" title="${r.reason}">WAIT</span>`;}
     else{
-      signals++;badge=`<span class="dir-badge ${r.dir}" title="${r.reason}">${r.dir==='buy'?'CALL':'PUT'}</span>`;
+      signals++;
+      const typeTag=r.srType==='BREAKOUT'?' · BRK':r.srType==='BOUNCE'?' · BNC':'';
+      badge=`<span class="dir-badge ${r.dir}" title="${r.reason}">${r.dir==='buy'?'CALL':'PUT'}${typeTag}</span>`;
       sp=spark(r.klines,r.dir);
-      if(window.isUnlocked)sendTelegram(key,r.dir,r.price,r.score);
+      if(window.isUnlocked)sendTelegram(key,r.dir,r.price,r.score,r.srType,r.srLevel);
     }
     html+=`<tr><td style="cursor:pointer;font-weight:700;color:var(--blue)" onclick="switchChart('${key}')">${a.name}</td><td><b>${pFmt}</b>${sp}</td><td>${badge}</td><td>${scorebar(r.score,r.dir)}</td></tr>`;
   }
@@ -442,7 +512,7 @@ async function runScanner(){
 // TELEGRAM
 window.saveTgKeys=function(){localStorage.setItem('tve_tok',document.getElementById('tgToken').value.trim());localStorage.setItem('tve_cid',document.getElementById('tgChatId').value.trim());alert('บันทึกเรียบร้อยแล้วครับ');};
 function loadTgKeys(){const t=localStorage.getItem('tve_tok'),c=localStorage.getItem('tve_cid');if(t)document.getElementById('tgToken').value=t;if(c)document.getElementById('tgChatId').value=c;}
-async function sendTelegram(key,dir,price,score){
+async function sendTelegram(key,dir,price,score,srType,srLevel){
   const tok=localStorage.getItem('tve_tok'),cid=localStorage.getItem('tve_cid');
   if(!tok||!cid){logSignal(key,dir,price);return;}
   const sk=`${key}_${dir}_${tf}_${filterLevel}`;if(lastSent[key]===sk)return;
@@ -450,7 +520,8 @@ async function sendTelegram(key,dir,price,score){
   const expiry=tf==='15'?'1 MIN':tf==='60'?'5 MIN':'15 MIN';
   const grade=score>=70?'STRONG':score>=50?'NORMAL':'WEAK';
   const bar='|'.repeat(Math.round(score/10))+'_'.repeat(10-Math.round(score/10));
-  const t=encodeURIComponent(`TVE SIGNAL\n---\n${key} | ${dir==='buy'?'CALL':'PUT'}\nExpiry: ${expiry}\nScore: ${score}/100 [${grade}]\n[${bar}]\nEntry: $${price.toLocaleString('en-US')}\n${new Date().toLocaleTimeString('th-TH')} BKK\nFilter: ${filterLevel.toUpperCase()}`);
+  const srLine=srType?`S/R: ${srType==='BREAKOUT'?'Breakout':'Bounce'} @ ${srLevel.toFixed(srLevel<10?5:2)}\n`:'';
+  const t=encodeURIComponent(`TVE SIGNAL\n---\n${key} | ${dir==='buy'?'CALL':'PUT'}\nExpiry: ${expiry}\n${srLine}Score: ${score}/100 [${grade}]\n[${bar}]\nEntry: $${price.toLocaleString('en-US')}\n${new Date().toLocaleTimeString('th-TH')} BKK\nFilter: ${filterLevel.toUpperCase()}`);
   try{const r=await fetch(`https://api.telegram.org/bot${tok}/sendMessage?chat_id=${cid}&text=${t}`);if(r.ok){lastSent[key]=sk;logSignal(key,dir,price);}}catch(e){}
 }
 
@@ -482,49 +553,23 @@ const DKEY='tve_daily_v3';
 function todayStr(){return new Date().toLocaleDateString('th-TH',{timeZone:'Asia/Bangkok',year:'numeric',month:'2-digit',day:'2-digit'});}
 function loadDaily(){try{const d=JSON.parse(localStorage.getItem(DKEY)||'null');if(!d||d.date!==todayStr()){const f={date:todayStr(),entries:[]};localStorage.setItem(DKEY,JSON.stringify(f));return f;}return d;}catch(e){return{date:todayStr(),entries:[]};}}
 function saveDaily(d){localStorage.setItem(DKEY,JSON.stringify(d));}
-function logSignal(key, dir, price) {
-  const d = loadDaily();
-  if (d.entries.some(e => e.asset === key && e.result === 'pending')) return;
-  
-  // แปลงค่า TF ที่เลือก (15, 60, 240) เป็นนาทีจริง (1, 5, 15)
-  const minutes = (tf === '15') ? 1 : (tf === '60' ? 5 : 15);
-  const expSec = minutes * 60; 
-  
-  d.entries.push({
-    id: Date.now(),
-    time: new Date().toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' }),
-    asset: key,
-    dir,
-    entryPrice: price,
-    expirySec: expSec,
-    resolveAt: Date.now() + (expSec * 1000),
-    result: 'pending'
-  });
-  saveDaily(d);
-  renderDaily();
+function logSignal(key,dir,price){
+  const d=loadDaily();if(d.entries.some(e=>e.asset===key&&e.result==='pending'))return;
+  const expSec=parseInt(tf)*60;
+  d.entries.push({id:Date.now(),time:new Date().toLocaleTimeString('th-TH',{timeZone:'Asia/Bangkok',hour:'2-digit',minute:'2-digit'}),asset:key,dir,entryPrice:price,resolveAt:Date.now()+expSec*1000,result:'pending'});
+  saveDaily(d);renderDaily();
 }
 async function resolvePending(){
-  const d = loadDaily();
-  const now = Date.now();
-  let changed = false;
+  const d=loadDaily();const now=Date.now();let changed=false;
   for(const e of d.entries){
-    if(e.result !== 'pending' || now < e.resolveAt) continue;
-    const a = ASSETS[e.asset];
-    if(!a) continue;
+    if(e.result!=='pending'||now<e.resolveAt)continue;
+    const a=ASSETS[e.asset];if(!a)continue;
     try{
-      // ใช้ความละเอียด 1m สำหรับการเช็กผล
-      const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${a.sym}&interval=1m&limit=3`);
-      if(res.ok){
-        const kl = await res.json();
-        const cp = parseFloat(kl[kl.length-2][4]);
-        e.result = ((e.dir==='buy' && cp > e.entryPrice) || (e.dir==='sell' && cp < e.entryPrice)) ? 'win' : 'lose';
-        e.closePrice = cp;
-        changed = true;
-      }
-    } catch(ex){}
+      const inv=e.resolveAt-e.id<=60000?'1m':e.resolveAt-e.id<=300000?'5m':'15m';
+      const res=await fetch(`https://api.binance.com/api/v3/klines?symbol=${a.sym}&interval=${inv}&limit=3`);
+      if(res.ok){const kl=await res.json();const cp=parseFloat(kl[kl.length-2][4]);e.result=((e.dir==='buy'&&cp>e.entryPrice)||(e.dir==='sell'&&cp<e.entryPrice))?'win':'lose';e.closePrice=cp;changed=true;}
+    }catch(ex){}
   }
-  if(changed){ saveDaily(d); renderDaily(); }
-}
   if(changed){saveDaily(d);renderDaily();}
 }
 function renderDaily(){
